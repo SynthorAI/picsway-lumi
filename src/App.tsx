@@ -1,617 +1,572 @@
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  FormEvent,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
-import {
-  Aperture,
-  ArrowUp,
-  CakeSlice,
-  Camera,
+  ArrowRight,
   Check,
-  ChevronRight,
+  CheckCircle2,
   CircleDollarSign,
-  Heart,
+  ExternalLink,
   LockKeyhole,
-  RotateCcw,
+  MapPin,
+  RefreshCcw,
+  Send,
   ShieldCheck,
   Sparkles,
-  Users,
-  Video,
-} from 'lucide-react';
-
-type Message = {
-  from: 'lumi' | 'user';
-  text: string;
-};
+} from 'lucide-react'
 
 type UiOption = {
-  id: string;
-  label: string;
-};
+  id: string
+  label: string
+}
 
-type UiState = {
-  type:
-    | 'single_select'
-    | 'multi_select'
-    | 'actions'
-    | 'text'
-    | 'email'
-    | 'date'
-    | 'number'
-    | 'currency'
-    | 'otp'
-    | 'status';
-  questionId: string;
-  prompt?: string;
-  options?: UiOption[];
-  actions?: UiOption[];
-  allowFreeText?: boolean;
-  minSelections?: number;
-  maxSelections?: number;
-  selectedValues?: string[];
-  min?: number;
-  max?: number;
-  step?: number;
-  length?: number;
-  maxLength?: number;
-};
+type LumiUi = {
+  type: string
+  questionId: string
+  prompt?: string
+  options?: UiOption[]
+  actions?: UiOption[]
+  allowFreeText?: boolean
+  minSelections?: number
+  maxSelections?: number
+  min?: number
+  max?: number
+  step?: number
+  maxLength?: number
+  length?: number
+  optional?: boolean
+  selectedValues?: string[]
+  quoteId?: string | null
+  expiresAt?: string | null
+}
 
-type ApiData = {
-  missingFields?: string[];
-  quoteStatus?: string;
-  customerFacingPrice?: string;
-  negotiationStatus?: string;
-  selectedQuoteStatus?: string;
-  emailVerified?: boolean;
-};
+type LumiData = {
+  missingFields?: string[]
+  quoteStatus?: string | null
+  customerFacingPrice?: number | string | null
+  negotiationStatus?: string | null
+  selectedQuoteStatus?: string | null
+  emailVerified?: boolean
+  verificationDeliveryStatus?: string | null
+  verificationDeliveryCode?: string | null
+}
 
-type ApiResponse = {
-  success: boolean;
-  sessionId?: string;
-  status?: string;
-  reply?: string;
-  message?: string;
-  error?: string;
-  data?: ApiData;
-  ui?: UiState | null;
-  returningCustomer?: { status?: string };
-};
+type LumiResponse = {
+  success?: boolean
+  error?: string | null
+  message?: string
+  reply?: string
+  sessionId?: string
+  status?: string
+  data?: LumiData
+  ui?: LumiUi | null
+}
+
+type ChatItem = {
+  id: string
+  role: 'assistant' | 'user'
+  text: string
+}
 
 const API_URL =
-  import.meta.env.VITE_API_URL ||
-  'https://i0cae18igk.execute-api.us-east-2.amazonaws.com/chat';
+  import.meta.env.VITE_LUMI_API_URL ||
+  'https://i0cae18igk.execute-api.us-east-2.amazonaws.com/chat'
 
-const SESSION_KEY = 'picsway-lumi-session';
-const newSession = () => crypto.randomUUID();
-const getSession = () => {
-  let id = sessionStorage.getItem(SESSION_KEY);
-  if (!id) {
-    id = newSession();
-    sessionStorage.setItem(SESSION_KEY, id);
-  }
-  return id;
-};
+const SESSION_KEY = 'picsway_lumi_session_id_v12'
+const STATE_KEY = 'picsway_lumi_state_v12'
+const CHAT_KEY = 'picsway_lumi_chat_v12'
 
-function unwrapApi(raw: unknown): ApiResponse {
-  const outer = raw as Record<string, unknown>;
-  let body: unknown = outer?.body ?? raw;
-  if (typeof body === 'string') {
-    try {
-      body = JSON.parse(body);
-    } catch {
-      return {
-        success: false,
-        error: 'InvalidApiResponse',
-        message: 'Lumi returned an unreadable response.',
-      };
-    }
-  }
-  return (body ?? {}) as ApiResponse;
+const starterChat: ChatItem[] = [
+  {
+    id: 'welcome',
+    role: 'assistant',
+    text: "Hi — I'm Lumi. I'll guide you through a clean, secure PicSway quote one step at a time.",
+  },
+]
+
+function makeId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
-function money(value?: string) {
-  if (!value) return '';
-  const number = Number(value);
-  return Number.isFinite(number)
-    ? `$${number.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
-    : '';
+function formatMoney(value: number | string | null | undefined) {
+  if (value === null || value === undefined || value === '') return null
+  const numeric = Number(value)
+  if (Number.isNaN(numeric)) return String(value)
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 0,
+  }).format(numeric)
 }
 
-function maskEmail(value: string) {
-  const [local, domain] = value.split('@');
-  if (!domain) return value;
-  const visible = local.slice(0, Math.min(2, local.length));
-  return `${visible}${'*'.repeat(Math.max(2, Math.min(5, local.length - visible.length)))}@${domain}`;
+function formatExpiry(value?: string | null) {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(date)
 }
 
-function iconForOption(id: string) {
-  const size = 18;
-  if (id.includes('BIRTHDAY')) return <CakeSlice size={size} />;
-  if (id.includes('MARRIAGE') || id.includes('NIKAH') || id.includes('WEDDING')) {
-    return <Heart size={size} />;
-  }
-  if (id.includes('PHOTO')) return <Camera size={size} />;
-  if (id.includes('VIDEO') || id.includes('CINEMATIC')) return <Video size={size} />;
-  if (id.includes('GUEST')) return <Users size={size} />;
-  if (id.includes('BUDGET') || id.includes('PRICE') || id.includes('COUNTER')) {
-    return <CircleDollarSign size={size} />;
-  }
-  if (id.includes('VERIFY') || id.includes('SAVE')) return <ShieldCheck size={size} />;
-  return <ChevronRight size={size} />;
-}
-
-function userDisplayForInput(ui: UiState | null | undefined, value: string) {
-  if (ui?.type === 'email') return maskEmail(value);
-  if (ui?.type === 'otp') return 'Verification code submitted';
-  if (ui?.type === 'currency') {
-    const cleaned = value.replace(/[$,\s]/g, '');
-    const number = Number(cleaned);
-    return Number.isFinite(number) ? `$${number.toLocaleString('en-US')}` : value;
-  }
-  return value;
-}
-
-function stageIndex(status?: string, ui?: UiState | null) {
-  if (status === 'SELECTED' || ui?.questionId === 'quote_saved') return 4;
-  if (status === 'PENDING_EMAIL_VERIFICATION' || ui?.type === 'otp') return 3;
+function currentStage(ui: LumiUi | null, response: LumiResponse | null) {
+  const qid = ui?.questionId || ''
   if (
-    ['QUOTE_READY', 'NEGOTIATING', 'QUOTE_ACCEPTED'].includes(status || '') ||
-    ['quote_action', 'negotiation_action', 'save_quote_action'].includes(ui?.questionId || '')
+    qid.includes('quote_saved') ||
+    qid.includes('otp') ||
+    qid.includes('save_quote') ||
+    response?.data?.selectedQuoteStatus === 'SELECTED'
   ) {
-    return 3;
+    return 4
   }
   if (
-    ui?.questionId === 'services' ||
-    ui?.questionId === 'second_shooter' ||
-    ui?.questionId?.startsWith('coverage_hours_') ||
-    ui?.questionId?.startsWith('event_') ||
-    ui?.questionId === 'guest_count' ||
-    ui?.questionId === 'budget_range' ||
-    ui?.questionId === 'referral_source'
+    qid.includes('quote_action') ||
+    qid.includes('negotiation') ||
+    qid.includes('counteroffer') ||
+    response?.data?.quoteStatus === 'QUOTE_READY'
   ) {
-    return 2;
+    return 3
   }
-  return 1;
+  if (
+    qid.includes('services') ||
+    qid.includes('coverage') ||
+    qid.includes('second_shooter') ||
+    qid.includes('package_edit')
+  ) {
+    return 2
+  }
+  return 1
+}
+
+function isStateQuestion(ui: LumiUi | null) {
+  return Boolean(ui?.questionId?.startsWith('event_state_'))
+}
+
+function inputMeta(ui: LumiUi | null) {
+  const qid = ui?.questionId || ''
+  if (qid === 'email') {
+    return { type: 'email', placeholder: 'you@example.com', prefix: '' }
+  }
+  if (qid.startsWith('event_date_')) {
+    return { type: 'date', placeholder: '', prefix: '' }
+  }
+  if (qid === 'budget_amount') {
+    return { type: 'number', placeholder: 'e.g. 3500', prefix: '$' }
+  }
+  if (qid === 'counteroffer_amount') {
+    return { type: 'number', placeholder: 'Enter your counteroffer', prefix: '$' }
+  }
+  if (ui?.type === 'number' || ui?.type === 'currency') {
+    return { type: 'number', placeholder: 'Enter amount', prefix: ui.type === 'currency' ? '$' : '' }
+  }
+  if (ui?.type === 'otp') {
+    return { type: 'text', placeholder: '6-digit code', prefix: '' }
+  }
+  if (qid.startsWith('event_exact_location_')) {
+    return { type: 'text', placeholder: 'Venue name, city, or address', prefix: '' }
+  }
+  if (qid === 'full_name') {
+    return { type: 'text', placeholder: 'Your full name', prefix: '' }
+  }
+  return { type: 'text', placeholder: 'Type your answer', prefix: '' }
 }
 
 export default function App() {
-  const [sessionId, setSessionId] = useState(getSession);
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      from: 'lumi',
-      text: "Hi — I'm Lumi, PicSway's quote assistant. I'll guide you through a secure quote one step at a time.",
-    },
-  ]);
-  const [last, setLast] = useState<ApiResponse | null>(null);
-  const [started, setStarted] = useState(false);
-  const [input, setInput] = useState('');
-  const [multiSelected, setMultiSelected] = useState<string[]>([]);
-  const [otp, setOtp] = useState(['', '', '', '', '', '']);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [lastPrice, setLastPrice] = useState<string>();
-  const endRef = useRef<HTMLDivElement>(null);
+  const [response, setResponse] = useState<LumiResponse | null>(null)
+  const [chat, setChat] = useState<ChatItem[]>(starterChat)
+  const [input, setInput] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [multiSelected, setMultiSelected] = useState<string[]>([])
+  const initialized = useRef(false)
+  const chatEndRef = useRef<HTMLDivElement | null>(null)
 
-  const ui = last?.ui ?? null;
-  const stage = stageIndex(last?.status, ui);
-  const optionLocked = Boolean(
-    ui && ['single_select', 'multi_select', 'actions', 'status', 'otp'].includes(ui.type),
-  );
-  const isOtp = ui?.type === 'otp';
-  const isMulti = ui?.type === 'multi_select';
-  const canText = Boolean(
-    ui && ['text', 'email', 'date', 'number', 'currency'].includes(ui.type),
-  );
+  const ui = response?.ui || null
+  const stage = currentStage(ui, response)
+  const price = formatMoney(response?.data?.customerFacingPrice)
+  const meta = inputMeta(ui)
+
+  const stageNames = ['Details', 'Services', 'Quote', 'Verified']
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, last, loading]);
+    if (initialized.current) return
+    initialized.current = true
 
-  useEffect(() => {
-    setMultiSelected(ui?.selectedValues ?? []);
-    setOtp(['', '', '', '', '', '']);
-    setInput('');
-  }, [ui?.questionId]);
+    const savedState = sessionStorage.getItem(STATE_KEY)
+    const savedChat = sessionStorage.getItem(CHAT_KEY)
 
-  useEffect(() => {
-    const price = last?.data?.customerFacingPrice;
-    if (price) setLastPrice(price);
-  }, [last?.data?.customerFacingPrice]);
-
-  const quoteVisible = useMemo(
-    () =>
-      Boolean(lastPrice) &&
-      ['QUOTE_READY', 'NEGOTIATING', 'QUOTE_ACCEPTED', 'PENDING_EMAIL_VERIFICATION', 'SELECTED'].includes(
-        last?.status || '',
-      ),
-    [last?.status, lastPrice],
-  );
-
-  async function request(
-    payload: Record<string, unknown>,
-    userDisplay?: string,
-    options: { silentUser?: boolean } = {},
-  ) {
-    if (loading) return;
-    setError('');
-    if (userDisplay && !options.silentUser) {
-      setMessages((current) => [...current, { from: 'user', text: userDisplay }]);
+    if (savedState) {
+      try {
+        setResponse(JSON.parse(savedState) as LumiResponse)
+      } catch {
+        sessionStorage.removeItem(STATE_KEY)
+      }
     }
-    setLoading(true);
+
+    if (savedChat) {
+      try {
+        setChat(JSON.parse(savedChat) as ChatItem[])
+      } catch {
+        sessionStorage.removeItem(CHAT_KEY)
+      }
+    }
+
+    if (!savedState) {
+      void sendRequest({ message: 'start' }, false)
+    }
+  }, [])
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }, [chat, ui?.questionId])
+
+  useEffect(() => {
+    setInput('')
+    setMultiSelected(ui?.selectedValues || [])
+  }, [ui?.questionId])
+
+  const optionGroups = useMemo(() => ui?.options || [], [ui?.options])
+
+  async function sendRequest(
+    payload: { message?: string; selection?: { questionId: string; value?: string; values?: string[] } },
+    addUserBubble = true,
+    displayText?: string,
+  ) {
+    if (loading) return
+    setLoading(true)
+    setError(null)
+
+    const sessionId = sessionStorage.getItem(SESSION_KEY)
+    const body = {
+      ...payload,
+      ...(sessionId ? { sessionId } : {}),
+    }
+
+    if (addUserBubble && displayText) {
+      setChat((items) => [...items, { id: makeId(), role: 'user', text: displayText }])
+    }
 
     try {
-      const response = await fetch(API_URL, {
+      const res = await fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, ...payload }),
-      });
-      const raw = await response.json();
-      const body = unwrapApi(raw);
+        body: JSON.stringify(body),
+      })
 
-      if (body.sessionId && body.sessionId !== sessionId) {
-        setSessionId(body.sessionId);
-        sessionStorage.setItem(SESSION_KEY, body.sessionId);
-      }
+      const data = (await res.json()) as LumiResponse
+      if (data.sessionId) sessionStorage.setItem(SESSION_KEY, data.sessionId)
+      setResponse(data)
+      sessionStorage.setItem(STATE_KEY, JSON.stringify(data))
 
-      setLast(body);
-      const reply = body.reply || body.message;
-      if (reply) {
-        setMessages((current) => [...current, { from: 'lumi', text: reply }]);
-      }
+      const assistantText = data.reply || data.message || 'Please continue with the next step.'
+      setChat((items) => {
+        const next = [...items, { id: makeId(), role: 'assistant' as const, text: assistantText }]
+        sessionStorage.setItem(CHAT_KEY, JSON.stringify(next))
+        return next
+      })
 
-      // Validation responses intentionally return the current server-owned UI.
-      // Keep the user in that state instead of replacing it with a generic error.
-      if (!response.ok && !body.ui) {
-        throw new Error(body.message || 'Request failed');
+      const expectedBootstrapPrompt = !addUserBubble && data.error === 'InvalidFieldValue' && data.ui?.questionId === 'full_name'
+      if ((!res.ok || data.success === false) && !expectedBootstrapPrompt) {
+        setError(data.message || data.reply || 'That step could not be completed.')
       }
-      if (body.success === false && !body.ui && !reply) {
-        throw new Error(body.message || 'Request failed');
-      }
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : '';
-      setError(message || "Lumi couldn't complete that request right now. Please try again.");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to reach Lumi.'
+      setError(message)
     } finally {
-      setLoading(false);
+      setLoading(false)
     }
   }
 
-  async function startQuote() {
-    setStarted(true);
-    await request({ message: 'START MY QUOTE' }, undefined, { silentUser: true });
-  }
-
-  async function sendSelection(option: UiOption) {
-    if (!ui || loading) return;
-    await request(
-      {
-        selection: {
-          questionId: ui.questionId,
-          value: option.id,
-        },
-      },
+  function chooseSingle(option: UiOption) {
+    if (!ui) return
+    void sendRequest(
+      { selection: { questionId: ui.questionId, value: option.id } },
+      true,
       option.label,
-    );
+    )
   }
 
-  async function sendMultiSelection() {
-    if (!ui || loading) return;
-    const labels = (ui.options ?? [])
-      .filter((option) => multiSelected.includes(option.id))
-      .map((option) => option.label);
-    await request(
-      {
-        selection: {
-          questionId: ui.questionId,
-          values: multiSelected,
-        },
-      },
-      labels.join(' + '),
-    );
-  }
-
-  function toggleMulti(id: string) {
-    if (!ui) return;
+  function toggleMulti(option: UiOption) {
     setMultiSelected((current) => {
-      if (current.includes(id)) return current.filter((value) => value !== id);
-      const max = ui.maxSelections ?? (ui.options?.length || 1);
-      if (current.length >= max) return current;
-      return [...current, id];
-    });
+      if (current.includes(option.id)) {
+        return current.filter((value) => value !== option.id)
+      }
+      if (ui?.maxSelections && current.length >= ui.maxSelections) {
+        return current
+      }
+      return [...current, option.id]
+    })
   }
 
-  async function submitText(event: FormEvent) {
-    event.preventDefault();
-    const value = input.trim();
-    if (!value || loading || !canText || !ui) return;
-    await request({ message: value }, userDisplayForInput(ui, value));
+  function submitMulti() {
+    if (!ui || multiSelected.length === 0) return
+    const labels = optionGroups
+      .filter((option) => multiSelected.includes(option.id))
+      .map((option) => option.label)
+      .join(', ')
+    void sendRequest(
+      { selection: { questionId: ui.questionId, values: multiSelected } },
+      true,
+      labels,
+    )
   }
 
-  async function verifyOtp() {
-    if (!ui || loading) return;
-    const code = otp.join('');
-    if (!/^\d{6}$/.test(code)) return;
-    await request({ message: code }, 'Verification code submitted');
+  function submitInput(event: FormEvent) {
+    event.preventDefault()
+    const value = input.trim()
+    if (!value || !ui) return
+    void sendRequest({ message: value }, true, value)
   }
 
-  async function otpAction(option: UiOption) {
-    if (!ui || loading) return;
-    await request(
-      {
-        selection: {
-          questionId: ui.questionId,
-          value: option.id,
-        },
-      },
-      option.label,
-    );
+  function skipBudget() {
+    if (ui?.questionId !== 'budget_amount') return
+    void sendRequest({ message: 'skip' }, true, 'Budget: not sure yet')
   }
 
-  function reset() {
-    const id = newSession();
-    sessionStorage.setItem(SESSION_KEY, id);
-    setSessionId(id);
-    setStarted(false);
-    setLast(null);
-    setInput('');
-    setMultiSelected([]);
-    setOtp(['', '', '', '', '', '']);
-    setLastPrice(undefined);
-    setError('');
-    setMessages([
-      {
-        from: 'lumi',
-        text: "Hi — I'm Lumi, PicSway's quote assistant. I'll guide you through a secure quote one step at a time.",
-      },
-    ]);
+  function triggerUiAction(action: UiOption) {
+    if (!ui) return
+    void sendRequest(
+      { selection: { questionId: ui.questionId, value: action.id } },
+      true,
+      action.label,
+    )
   }
 
-  const inputType = ui?.type === 'email' ? 'email' : ui?.type === 'date' ? 'date' : ui?.type === 'number' ? 'number' : 'text';
-  const placeholder =
-    ui?.type === 'currency'
-      ? 'Enter an amount…'
-      : ui?.type === 'email'
-        ? 'name@example.com'
-        : ui?.type === 'date'
-          ? 'Choose a date'
-          : ui?.prompt || 'Message Lumi…';
+  function resetSession() {
+    sessionStorage.removeItem(SESSION_KEY)
+    sessionStorage.removeItem(STATE_KEY)
+    sessionStorage.removeItem(CHAT_KEY)
+    setResponse(null)
+    setChat(starterChat)
+    setInput('')
+    setError(null)
+    setMultiSelected([])
+    void sendRequest({ message: 'start' }, false)
+  }
 
-  const minimum = ui?.minSelections ?? 1;
-  const maximum = ui?.maxSelections ?? ui?.options?.length ?? 1;
-  const multiReady = multiSelected.length >= minimum && multiSelected.length <= maximum;
+  const showInput = Boolean(
+    ui && ['text', 'email', 'date', 'number', 'currency', 'otp'].includes(ui.type),
+  )
+
+  const statusSaved = ui?.questionId === 'quote_saved'
+  const manualReview = ui?.questionId === 'manual_review'
 
   return (
-    <main className="lumiPage">
-      <section className="lumiShell" aria-label="PicSway Lumi quote assistant">
-        <header className="lumiHeader">
-          <div className="brandmark"><Aperture size={22} /></div>
-          <div className="brandCopy">
-            <div className="titleRow">
-              <h1>Lumi</h1>
-              <span className="online"><i />Online</span>
+    <main className="page-shell">
+      <section className="lumi-app" aria-label="PicSway Lumi quote assistant">
+        <header className="topbar">
+          <div className="brand-wrap">
+            <div className="brand-mark" aria-hidden="true">
+              <Sparkles size={20} strokeWidth={2.2} />
             </div>
-            <p>PicSway Quote Assistant</p>
+            <div>
+              <div className="brand-line">
+                <span className="brand-name">Lumi</span>
+                <span className="online-pill"><span />ONLINE</span>
+              </div>
+              <div className="brand-sub">PicSway Quote Assistant</div>
+            </div>
           </div>
-          <div className="secureBadge"><ShieldCheck size={14} /> Secure quote flow</div>
-          <button className="reset" onClick={reset} title="Start a new quote" aria-label="Start a new quote">
-            <RotateCcw size={17} />
-          </button>
+
+          <div className="top-actions">
+            <div className="secure-pill"><ShieldCheck size={16} /> Secure quote flow</div>
+            <button className="icon-button" onClick={resetSession} title="Start a new quote" aria-label="Start a new quote">
+              <RefreshCcw size={18} />
+            </button>
+          </div>
         </header>
 
-        <div className="progress" aria-label="Quote progress">
-          {['Event', 'Package', 'Quote', 'Verified'].map((label, index) => (
-            <div className="progressPart" key={label}>
-              <span className={stage >= index + 1 ? 'on' : ''}>{label}</span>
-              {index < 3 && <b className={stage > index + 1 ? 'on' : ''} />}
-            </div>
-          ))}
-        </div>
-
-        <div className="chat">
-          <div className="ambientLight lightOne" />
-          <div className="ambientLight lightTwo" />
-
-          {messages.map((message, index) => (
-            <div key={`${message.from}-${index}`} className={`row ${message.from}`}>
-              {message.from === 'lumi' && <div className="mini"><Sparkles size={14} /></div>}
-              <div className="bubble">{message.text}</div>
-            </div>
-          ))}
-
-          {!started && (
-            <div className="startCard">
-              <div className="startIcon"><Camera size={22} /></div>
-              <div>
-                <strong>Build your PicSway quote</strong>
-                <p>Guided options keep your package accurate while Lumi handles the conversation.</p>
+        <nav className="progress" aria-label="Quote progress">
+          {stageNames.map((name, index) => {
+            const number = index + 1
+            const active = stage === number
+            const complete = stage > number
+            return (
+              <div className={`progress-step ${active ? 'active' : ''} ${complete ? 'complete' : ''}`} key={name}>
+                <span className="progress-number">{complete ? <Check size={13} /> : number}</span>
+                <span>{name}</span>
               </div>
-              <button disabled={loading} onClick={startQuote}>Start my quote <ChevronRight size={17} /></button>
-            </div>
-          )}
+            )
+          })}
+        </nav>
 
-          {loading && (
-            <div className="row lumi">
-              <div className="mini"><Sparkles size={14} /></div>
-              <div className="bubble typing">Lumi is working<span>…</span></div>
-            </div>
-          )}
+        <div className="workspace">
+          <section className="chat-column">
+            <div className="chat-scroll">
+              {chat.map((item) => (
+                <div key={item.id} className={`message-row ${item.role}`}>
+                  {item.role === 'assistant' && (
+                    <div className="assistant-avatar" aria-hidden="true"><Sparkles size={17} /></div>
+                  )}
+                  <div className={`bubble ${item.role}`}>{item.text}</div>
+                </div>
+              ))}
 
-          {error && (
-            <div className="errorBox">
-              <span>{error}</span>
-              <button onClick={() => setError('')}>Dismiss</button>
-            </div>
-          )}
+              {price && (response?.data?.quoteStatus === 'QUOTE_READY' || response?.data?.negotiationStatus) && (
+                <div className="quote-card">
+                  <div className="quote-kicker">Current PicSway quote</div>
+                  <div className="quote-price">{price}</div>
+                  <div className="quote-note">This is your current package price. You can accept it, discuss price, or adjust the package.</div>
+                </div>
+              )}
 
-          {quoteVisible && (
-            <div className="quoteCard">
-              <div className="eyebrow">
-                {last?.status === 'NEGOTIATING' ? 'CURRENT AUTHORIZED OFFER' : 'YOUR PICSWAY QUOTE'}
-              </div>
-              <div className="price">{money(lastPrice)}</div>
-              <div className="rule" />
-              <div className="securityLine"><ShieldCheck size={15} /> Pricing is validated by PicSway before it is shown.</div>
-              {last?.status === 'QUOTE_ACCEPTED' && (
-                <div className="accepted"><Check size={16} /> Accepted — verify your email to save it securely.</div>
+              {error && (
+                <div className="error-card">
+                  <strong>Couldn’t complete that step.</strong>
+                  <span>{error}</span>
+                </div>
+              )}
+
+              <div ref={chatEndRef} />
+            </div>
+
+            <div className="interaction-panel">
+              {ui?.prompt && !statusSaved && !manualReview && (
+                <div className="current-question">
+                  <div className="question-icon"><Sparkles size={16} /></div>
+                  <div>{ui.prompt}</div>
+                </div>
+              )}
+
+              {(ui?.type === 'single_select' || ui?.type === 'actions') && (
+                <div className={`options-grid ${isStateQuestion(ui) ? 'state-grid' : ''}`}>
+                  {optionGroups.map((option) => (
+                    <button
+                      key={option.id}
+                      className={`option-card ${isStateQuestion(ui) ? 'state-option' : ''}`}
+                      onClick={() => chooseSingle(option)}
+                      disabled={loading}
+                    >
+                      {isStateQuestion(ui) && <MapPin size={18} />}
+                      <span>{option.label}</span>
+                      <ArrowRight size={16} className="option-arrow" />
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {ui?.type === 'multi_select' && (
+                <>
+                  <div className="options-grid">
+                    {optionGroups.map((option) => {
+                      const selected = multiSelected.includes(option.id)
+                      return (
+                        <button
+                          key={option.id}
+                          className={`option-card multi ${selected ? 'selected' : ''}`}
+                          onClick={() => toggleMulti(option)}
+                          disabled={loading}
+                        >
+                          <span>{option.label}</span>
+                          <span className="check-dot">{selected && <Check size={14} />}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <button
+                    className="primary-button"
+                    onClick={submitMulti}
+                    disabled={loading || multiSelected.length < (ui.minSelections || 1)}
+                  >
+                    Continue <ArrowRight size={17} />
+                  </button>
+                </>
+              )}
+
+              {showInput && (
+                <form className="input-form" onSubmit={submitInput}>
+                  <div className={`input-shell ${meta.prefix ? 'with-prefix' : ''}`}>
+                    {meta.prefix && <span className="input-prefix">{meta.prefix}</span>}
+                    <input
+                      value={input}
+                      onChange={(event) => setInput(event.target.value)}
+                      type={meta.type}
+                      inputMode={ui?.type === 'currency' || ui?.type === 'number' ? 'decimal' : ui?.type === 'otp' ? 'numeric' : undefined}
+                      placeholder={meta.placeholder}
+                      maxLength={ui?.maxLength || (ui?.type === 'otp' ? ui.length || 6 : undefined)}
+                      min={ui?.min}
+                      max={ui?.max}
+                      step={ui?.step}
+                      autoComplete={ui?.type === 'email' ? 'email' : ui?.type === 'otp' ? 'one-time-code' : 'off'}
+                      aria-label={ui?.prompt || 'Lumi input'}
+                      disabled={loading}
+                    />
+                    <button className="send-button" type="submit" disabled={loading || !input.trim()} aria-label="Send">
+                      {loading ? <span className="spinner" /> : <Send size={18} />}
+                    </button>
+                  </div>
+
+                  {ui?.questionId === 'budget_amount' && (
+                    <button className="text-button" type="button" onClick={skipBudget} disabled={loading}>
+                      I’m not sure yet — skip budget
+                    </button>
+                  )}
+
+                  {ui?.questionId === 'counteroffer_amount' && (
+                    <div className="helper-line"><CircleDollarSign size={15} /> Enter the exact amount you want PicSway to consider.</div>
+                  )}
+
+                  {ui?.questionId?.startsWith('event_exact_location_') && (
+                    <div className="helper-line"><MapPin size={15} /> State is already selected. Enter the exact venue, city, or address here.</div>
+                  )}
+
+                  {ui?.actions && ui.actions.length > 0 && (
+                    <div className="secondary-actions">
+                      {ui.actions.map((action) => (
+                        <button type="button" className="secondary-button" key={action.id} onClick={() => triggerUiAction(action)} disabled={loading}>
+                          {action.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </form>
+              )}
+
+              {statusSaved && (
+                <div className="success-card">
+                  <CheckCircle2 size={30} />
+                  <div>
+                    <div className="success-title">Your quote is saved</div>
+                    <div className="success-copy">Email verification passed and your quote is securely stored.</div>
+                    {ui?.quoteId && <div className="quote-reference">Quote ID <strong>{ui.quoteId}</strong></div>}
+                    {ui?.expiresAt && <div className="success-expiry">Valid until {formatExpiry(ui.expiresAt)}</div>}
+                  </div>
+                </div>
+              )}
+
+              {manualReview && (
+                <div className="review-card">
+                  <LockKeyhole size={26} />
+                  <div>
+                    <div className="success-title">Custom PicSway review</div>
+                    <div className="success-copy">This request is outside the automatic quoting path, so Lumi will not invent a price.</div>
+                  </div>
+                </div>
               )}
             </div>
-          )}
+          </section>
 
-          {ui && !isOtp && ['single_select', 'actions'].includes(ui.type) && (
-            <div className={`choicePanel ${ui.type === 'actions' ? 'actionPanel' : ''}`}>
-              <div className="panelEyebrow">{ui.type === 'actions' ? 'CHOOSE YOUR NEXT STEP' : 'SELECT ONE'}</div>
-              <div className="choiceGrid">
-                {(ui.options ?? []).map((option) => (
-                  <button
-                    key={option.id}
-                    disabled={loading}
-                    className={option.id === 'SAVE_QUOTE' ? 'choice saveChoice' : 'choice'}
-                    onClick={() => sendSelection(option)}
-                  >
-                    <span className="choiceIcon">{iconForOption(option.id)}</span>
-                    <span>{option.label}</span>
-                    <ChevronRight className="choiceArrow" size={16} />
-                  </button>
-                ))}
-              </div>
+          <aside className="side-panel">
+            <div className="side-badge"><Sparkles size={15} /> LUMI</div>
+            <h1>Simple inputs.<br />A cleaner quote.</h1>
+            <p>Quick choices keep the flow easy, while exact details stay in your hands when they matter.</p>
+
+            <div className="side-points">
+              <div><MapPin size={18} /><span><strong>Venue state first</strong><small>NJ, NY, MI, or custom</small></span></div>
+              <div><CircleDollarSign size={18} /><span><strong>Your budget</strong><small>You enter the amount</small></span></div>
+              <div><ShieldCheck size={18} /><span><strong>Secure save</strong><small>Email verification before final save</small></span></div>
             </div>
-          )}
-
-          {ui && isMulti && (
-            <div className="choicePanel">
-              <div className="panelHeading">
-                <div>
-                  <div className="panelEyebrow">SELECT OPTIONS</div>
-                  <p>Choose {minimum === maximum ? minimum : `${minimum}–${maximum}`}.</p>
-                </div>
-                <span className="selectionCount">{multiSelected.length}/{maximum}</span>
-              </div>
-              <div className="choiceGrid multiGrid">
-                {(ui.options ?? []).map((option) => {
-                  const selected = multiSelected.includes(option.id);
-                  return (
-                    <button
-                      type="button"
-                      key={option.id}
-                      disabled={loading}
-                      aria-pressed={selected}
-                      className={`choice multiChoice ${selected ? 'selected' : ''}`}
-                      onClick={() => toggleMulti(option.id)}
-                    >
-                      <span className="choiceIcon">{iconForOption(option.id)}</span>
-                      <span>{option.label}</span>
-                      <span className="checkCircle">{selected && <Check size={14} />}</span>
-                    </button>
-                  );
-                })}
-              </div>
-              <button className="continueButton" disabled={!multiReady || loading} onClick={sendMultiSelection}>
-                Continue <ChevronRight size={17} />
-              </button>
-            </div>
-          )}
-
-          {isOtp && ui && (
-            <div className="otpCard">
-              <div className="lock"><LockKeyhole size={20} /></div>
-              <div className="eyebrow">EMAIL VERIFICATION</div>
-              <h3>Enter your 6-digit code</h3>
-              <p>{ui.prompt}</p>
-              <div className="otpInputs">
-                {otp.map((digit, index) => (
-                  <input
-                    key={index}
-                    inputMode="numeric"
-                    autoComplete={index === 0 ? 'one-time-code' : 'off'}
-                    maxLength={1}
-                    value={digit}
-                    aria-label={`Verification digit ${index + 1}`}
-                    onChange={(event) => {
-                      const value = event.target.value.replace(/\D/g, '').slice(-1);
-                      const next = [...otp];
-                      next[index] = value;
-                      setOtp(next);
-                      if (value) (event.target.nextElementSibling as HTMLInputElement | null)?.focus();
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Backspace' && !otp[index]) {
-                        (event.currentTarget.previousElementSibling as HTMLInputElement | null)?.focus();
-                      }
-                    }}
-                  />
-                ))}
-              </div>
-              <button className="primary" disabled={loading || otp.join('').length !== 6} onClick={verifyOtp}>
-                Verify email <ChevronRight size={17} />
-              </button>
-              {(ui.actions ?? []).map((action) => (
-                <button className="linkButton" key={action.id} disabled={loading} onClick={() => otpAction(action)}>
-                  {action.label}
-                </button>
-              ))}
-              <div className="privacyNote"><LockKeyhole size={13} /> Your quote is not permanently saved until verification succeeds.</div>
-            </div>
-          )}
-
-          {ui?.type === 'status' && ui.questionId === 'quote_saved' && (
-            <div className="savedCard">
-              <div className="savedIcon"><Check size={21} /></div>
-              <div className="eyebrow">VERIFIED & SAVED</div>
-              {lastPrice && <div className="price">{money(lastPrice)}</div>}
-              <p>Your PicSway quote has been securely saved after email verification.</p>
-              <p className="notice">The event is not booked until PicSway completes its normal contract and deposit process.</p>
-            </div>
-          )}
-
-          {ui?.type === 'status' && ui.questionId === 'manual_review' && (
-            <div className="reviewCard">
-              <Sparkles size={20} />
-              <div>
-                <strong>Custom PicSway review</strong>
-                <p>{ui.prompt}</p>
-              </div>
-            </div>
-          )}
-
-          <div ref={endRef} />
+          </aside>
         </div>
 
-        <div className={`composerWrap ${optionLocked && !isOtp ? 'locked' : ''}`}>
-          {canText && ui ? (
-            <form className="composer" onSubmit={submitText}>
-              {ui.type === 'currency' && <span className="inputPrefix">$</span>}
-              <input
-                type={inputType}
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                placeholder={placeholder}
-                aria-label={ui.prompt || 'Lumi input'}
-                disabled={loading}
-                min={ui.min}
-                max={ui.max}
-                step={ui.step}
-                maxLength={ui.maxLength}
-                autoComplete={ui.type === 'email' ? 'email' : ui.questionId === 'full_name' ? 'name' : 'off'}
-              />
-              <button aria-label="Send" disabled={loading || !input.trim()}><ArrowUp size={20} /></button>
-            </form>
-          ) : started && ui && !isOtp ? (
-            <div className="lockedComposer"><LockKeyhole size={14} /> Choose one of the secure options above to continue.</div>
-          ) : started && isOtp ? (
-            <div className="lockedComposer"><LockKeyhole size={14} /> Enter the verification code above.</div>
-          ) : (
-            <div className="lockedComposer muted">Start your quote to begin.</div>
-          )}
-        </div>
-
-        <footer>
-          <span>Powered by PicSway</span>
-          <span className="footerDot">•</span>
-          <span>Protected option-based quoting</span>
+        <footer className="app-footer">
+          <span>PicSway • Lumi</span>
+          <a href="https://mahdi.inksway.com" target="_blank" rel="noreferrer">
+            Developed by Mahdi <ExternalLink size={13} />
+          </a>
         </footer>
       </section>
     </main>
-  );
+  )
 }
